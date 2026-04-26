@@ -305,9 +305,10 @@ eventFrame:SetScript("OnUpdate", function(self, elapsed)
 end)
 
 -------------------------------------------------------------------------------
--- Settings Panel
+-- Settings Panel  (floating, draggable — opened by /bdt and the Addons page)
 -------------------------------------------------------------------------------
 local SettingsPanel
+local testModeBtn  -- forward ref; kept in sync by /bdt test slash command
 
 local function MakeLabel(parent, text, x, y)
     local fs = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
@@ -330,7 +331,6 @@ local function MakeSeparator(parent, x, y, width)
     sep:SetPoint("TOPLEFT", parent, "TOPLEFT", x, -y)
 end
 
--- Returns the checkbox frame so caller can store a ref if needed
 local function MakeCheckbox(parent, label, x, y, getter, setter)
     local cb = CreateFrame("CheckButton", nil, parent, "UICheckButtonTemplate")
     cb:SetPoint("TOPLEFT", parent, "TOPLEFT", x, -y)
@@ -340,7 +340,23 @@ local function MakeCheckbox(parent, label, x, y, getter, setter)
     return cb
 end
 
--- Returns the slider frame
+-- Toggle button: displays labelOn when active, labelOff when inactive
+local function MakeToggleButton(parent, labelOn, labelOff, x, y, width, getter, setter)
+    local btn = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
+    btn:SetSize(width, 26)
+    btn:SetPoint("TOPLEFT", parent, "TOPLEFT", x, -y)
+    local function Refresh()
+        btn:SetText(getter() and labelOn or labelOff)
+    end
+    Refresh()
+    btn:SetScript("OnClick", function()
+        setter(not getter())
+        Refresh()
+    end)
+    btn.Refresh = Refresh
+    return btn
+end
+
 local function MakeSlider(parent, label, minVal, maxVal, step, x, y, width, getter, setter, fmt)
     fmt = fmt or "%d"
 
@@ -368,13 +384,30 @@ local function MakeSlider(parent, label, minVal, maxVal, step, x, y, width, gett
         setter(val)
     end)
 
-    return sl
+    -- Return a group so the caller can Enable/Disable the whole widget together
+    local group = {}
+    function group:Enable()
+        sl:Enable()
+        title:SetAlpha(1); valText:SetAlpha(1)
+        sl.Low:SetAlpha(1); sl.High:SetAlpha(1)
+    end
+    function group:Disable()
+        sl:Disable()
+        title:SetAlpha(0.4); valText:SetAlpha(0.4)
+        sl.Low:SetAlpha(0.4); sl.High:SetAlpha(0.4)
+    end
+    return group
 end
+
+-- Forward declaration so RegisterInterfaceOptions can reference it
+local OpenSettings
 
 local function BuildSettingsPanel()
     local db = BossDebuffTrackerDB
 
     local PANEL_W = 440
+    local SLIDER_W = PANEL_W - 80
+
     local panel = CreateFrame("Frame", ADDON_NAME .. "Settings", UIParent,
         "BasicFrameTemplateWithInset")
     panel:SetWidth(PANEL_W)
@@ -389,8 +422,17 @@ local function BuildSettingsPanel()
     panel.TitleText:SetText("Boss Debuff Tracker — Settings")
     panel:Hide()
 
-    local SLIDER_W = PANEL_W - 80
-    local cx, cy  = 16, 44
+    -- All controls that should be disabled when the addon is turned off
+    local dependentControls = {}
+
+    -- Syncs every dependent control's enabled state to db.enabled
+    local function RefreshControlStates()
+        for _, ctrl in ipairs(dependentControls) do
+            if db.enabled then ctrl:Enable() else ctrl:Disable() end
+        end
+    end
+
+    local cx, cy = 16, 44
 
     -- ════════════════════════════════════════════════════════════════
     -- GENERAL
@@ -408,9 +450,12 @@ local function BuildSettingsPanel()
                     end
                 end
             end
+            RefreshControlStates()
         end); cy = cy + 30
 
-    MakeCheckbox(panel, "Test mode  (show fake debuffs on all boss frames)", cx, cy,
+    testModeBtn = MakeToggleButton(panel,
+        "Disable Test Debuffs", "Enable Test Debuffs",
+        cx, cy, 180,
         function() return db.testMode end,
         function(v)
             db.testMode = v
@@ -422,7 +467,8 @@ local function BuildSettingsPanel()
                 end
             end
             UpdateAll()
-        end); cy = cy + 38
+        end)
+    table.insert(dependentControls, testModeBtn); cy = cy + 36
 
     -- ════════════════════════════════════════════════════════════════
     -- DEBUFF FILTER
@@ -430,15 +476,17 @@ local function BuildSettingsPanel()
     MakeSeparator(panel, cx, cy, PANEL_W - 32); cy = cy + 10
     MakeSectionLabel(panel, "Debuff Filter", cx, cy); cy = cy + 24
 
-    MakeCheckbox(panel, "Show only MY debuffs  (debuffs cast by you)", cx, cy,
-        function() return db.onlyMine end,
-        function(v) db.onlyMine = v; UpdateAll() end); cy = cy + 30
+    table.insert(dependentControls,
+        MakeCheckbox(panel, "Show only MY debuffs  (debuffs cast by you)", cx, cy,
+            function() return db.onlyMine end,
+            function(v) db.onlyMine = v; UpdateAll() end)); cy = cy + 30
 
     -- Max debuffs shown slider  (1–10)
-    MakeSlider(panel, "Max debuffs shown per boss", 1, 10, 1,
-        cx, cy, SLIDER_W,
-        function() return db.maxDebuffs end,
-        function(v) db.maxDebuffs = v; UpdateAll() end); cy = cy + 62
+    table.insert(dependentControls,
+        MakeSlider(panel, "Max debuffs shown per boss", 1, 10, 1,
+            cx, cy, SLIDER_W,
+            function() return db.maxDebuffs end,
+            function(v) db.maxDebuffs = v; UpdateAll() end)); cy = cy + 62
 
     -- ════════════════════════════════════════════════════════════════
     -- ICONS
@@ -446,19 +494,22 @@ local function BuildSettingsPanel()
     MakeSeparator(panel, cx, cy, PANEL_W - 32); cy = cy + 10
     MakeSectionLabel(panel, "Icons", cx, cy); cy = cy + 24
 
-    MakeCheckbox(panel, "Show cooldown timer", cx, cy,
-        function() return db.showTimer end,
-        function(v) db.showTimer = v; ApplyTimers(); UpdateAll() end); cy = cy + 30
+    table.insert(dependentControls,
+        MakeCheckbox(panel, "Show cooldown timer", cx, cy,
+            function() return db.showTimer end,
+            function(v) db.showTimer = v; ApplyTimers(); UpdateAll() end)); cy = cy + 30
 
-    MakeCheckbox(panel, "Show stack count", cx, cy,
-        function() return db.showStacks end,
-        function(v) db.showStacks = v; UpdateAll() end); cy = cy + 30
+    table.insert(dependentControls,
+        MakeCheckbox(panel, "Show stack count", cx, cy,
+            function() return db.showStacks end,
+            function(v) db.showStacks = v; UpdateAll() end)); cy = cy + 30
 
     -- Icon size slider (16–48 px, step 2)
-    MakeSlider(panel, "Icon size  (px)", 16, 48, 2,
-        cx, cy, SLIDER_W,
-        function() return db.iconSize end,
-        function(v) db.iconSize = v; ApplyIconSize(); UpdateAll() end); cy = cy + 62
+    table.insert(dependentControls,
+        MakeSlider(panel, "Icon size  (px)", 16, 48, 2,
+            cx, cy, SLIDER_W,
+            function() return db.iconSize end,
+            function(v) db.iconSize = v; ApplyIconSize(); UpdateAll() end)); cy = cy + 62
 
     -- ════════════════════════════════════════════════════════════════
     -- POSITION  (single shared offset for all boss frames)
@@ -467,48 +518,64 @@ local function BuildSettingsPanel()
     MakeSectionLabel(panel, "Position  (all boss frames)", cx, cy); cy = cy + 20
     MakeLabel(panel, "Debuffs appear to the right of each boss frame.", cx, cy); cy = cy + 24
 
-    -- Horizontal gap slider  (0–80 px)
-    MakeSlider(panel, "Horizontal gap from boss frame  (X)", 0, 80, 1,
-        cx, cy, SLIDER_W,
-        function() return db.offsetX end,
-        function(v) db.offsetX = v; ApplyAllOffsets() end,
-        "%d px"); cy = cy + 62
+    -- Horizontal gap: negative values move icons left/closer to the boss frame
+    table.insert(dependentControls,
+        MakeSlider(panel, "Horizontal gap from boss frame  (X)", -80, 80, 1,
+            cx, cy, SLIDER_W,
+            function() return db.offsetX end,
+            function(v) db.offsetX = v; ApplyAllOffsets() end,
+            "%d px")); cy = cy + 62
 
     -- Vertical nudge slider  (-60 to +60 px)
-    MakeSlider(panel, "Vertical offset  (Y)  — positive = up", -60, 60, 1,
-        cx, cy, SLIDER_W,
-        function() return db.offsetY end,
-        function(v) db.offsetY = v; ApplyAllOffsets() end,
-        "%d px"); cy = cy + 62
+    table.insert(dependentControls,
+        MakeSlider(panel, "Vertical offset  (Y)  — positive = up", -60, 60, 1,
+            cx, cy, SLIDER_W,
+            function() return db.offsetY end,
+            function(v) db.offsetY = v; ApplyAllOffsets() end,
+            "%d px")); cy = cy + 62
 
-    -- ── Close button ──────────────────────────────────────────────────────────
+    -- Close button
     local closeBtn = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
     closeBtn:SetSize(90, 26)
     closeBtn:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -12, 10)
     closeBtn:SetText("Close")
     closeBtn:SetScript("OnClick", function() panel:Hide() end)
 
+    -- Sync control states whenever the panel is opened
+    panel:SetScript("OnShow", RefreshControlStates)
+
     panel:SetHeight(cy + 40)
     return panel
 end
 
-local function OpenSettings()
+OpenSettings = function()
     if not SettingsPanel then
         SettingsPanel = BuildSettingsPanel()
     end
-    if SettingsPanel:IsShown() then SettingsPanel:Hide()
-    else SettingsPanel:Show() end
+    if SettingsPanel:IsShown() then
+        SettingsPanel:Hide()
+    else
+        SettingsPanel:Show()
+    end
 end
 
+-- Registers a minimal stub in Interface > Options > Addons with a single
+-- launch button; all real settings live in the floating panel above.
 local function RegisterInterfaceOptions()
-    if Settings and Settings.RegisterAddOnCategory then
-        local category = Settings.RegisterVerticalLayoutCategory(ADDON_NAME)
+    local stub = CreateFrame("Frame", ADDON_NAME .. "StubPanel")
+    stub.name = ADDON_NAME
+
+    local btn = CreateFrame("Button", nil, stub, "UIPanelButtonTemplate")
+    btn:SetSize(220, 26)
+    btn:SetPoint("TOPLEFT", stub, "TOPLEFT", 16, -16)
+    btn:SetText("Open Boss Debuff Tracker")
+    btn:SetScript("OnClick", OpenSettings)
+
+    if Settings and Settings.RegisterCanvasLayoutCategory then
+        local category = Settings.RegisterCanvasLayoutCategory(stub, stub.name)
         Settings.RegisterAddOnCategory(category)
     elseif InterfaceOptions_AddCategory then
-        local optPanel = CreateFrame("Frame")
-        optPanel.name  = ADDON_NAME
-        optPanel:SetScript("OnShow", function() OpenSettings() end)
-        InterfaceOptions_AddCategory(optPanel)
+        InterfaceOptions_AddCategory(stub)
     end
 end
 
@@ -527,7 +594,7 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
             ApplyDefaults(BossDebuffTrackerDB, DEFAULTS)
             RegisterInterfaceOptions()
             print("|cff00ccff[BossDebuffTracker]|r loaded. " ..
-                  "Type |cffffd700/bdt|r to open settings.")
+                  "Type |cffffd700/bdt|r to open addon settings.")
         end
 
     elseif event == "PLAYER_ENTERING_WORLD" then
@@ -572,6 +639,7 @@ SlashCmdList["BOSSDEBUFFTRACKER"] = function(msg)
             end
         end
         UpdateAll()
+        if testModeBtn then testModeBtn.Refresh() end
         print("|cff00ccff[BossDebuffTracker]|r Test mode: " ..
             (db.testMode and "|cff00ff00ON|r" or "|cffff4444OFF|r"))
 
