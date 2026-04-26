@@ -1,5 +1,5 @@
 -- BossDebuffTracker.lua
--- Tracks debuffs on boss1–boss5, displayed to the RIGHT of each boss frame.
+-- Tracks debuffs on boss1–boss5, displayed next to each boss frame.
 
 local ADDON_NAME   = "BossDebuffTracker"
 local MAX_BOSSES   = 5
@@ -16,10 +16,18 @@ local DEFAULTS = {
     testMode   = false,
     onlyMine   = false,   -- true = only show debuffs cast by the player
     maxDebuffs = 5,       -- how many icons to show per boss (1–10)
-    -- Single shared offset applied to ALL boss frames (right-side anchor)
-    offsetX    = 4,       -- horizontal gap from the right edge of the boss frame
-    offsetY    = 0,       -- vertical nudge (positive = up, negative = down)
+    anchor     = "RIGHT", -- which side of the boss frame: RIGHT, LEFT, TOP, BOTTOM
+    offsetX    = 4,       -- horizontal fine-tune offset
+    offsetY    = 0,       -- vertical fine-tune offset
     filter     = {},      -- optional spell-ID whitelist
+}
+
+-- Maps anchor name → which point on the container + which point on the boss frame
+local ANCHOR_MAP = {
+    RIGHT  = { containerPoint = "LEFT",   bossPoint = "RIGHT"  },
+    LEFT   = { containerPoint = "RIGHT",  bossPoint = "LEFT"   },
+    TOP    = { containerPoint = "BOTTOM", bossPoint = "TOP"    },
+    BOTTOM = { containerPoint = "TOP",    bossPoint = "BOTTOM" },
 }
 
 BossDebuffTrackerDB = BossDebuffTrackerDB or {}
@@ -45,6 +53,7 @@ local UpdateAll
 local ApplyIconSize
 local ApplyTimers
 local ApplyAllOffsets
+local OpenSettings
 
 -------------------------------------------------------------------------------
 -- Debuff icon factory
@@ -75,13 +84,25 @@ local function CreateDebuffIcon(parent)
     f.border:Hide()
 
     f:SetScript("OnEnter", function(self)
-        if self.unit and self.index then
+        if EditModeManagerFrame and EditModeManagerFrame:IsShown() then
             GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-            GameTooltip:SetUnitAura(self.unit, self.index, "HARMFUL")
+            GameTooltip:SetText("Click to open Boss Debuff Tracker settings", 1, 1, 1)
+            GameTooltip:Show()
+        elseif self.unit and self.index then
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            local aura = C_UnitAuras.GetAuraDataByIndex(self.unit, self.index, "HARMFUL")
+            if aura then
+                GameTooltip:SetSpellByID(aura.spellId)
+            end
             GameTooltip:Show()
         end
     end)
     f:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    f:SetScript("OnMouseDown", function(self, button)
+        if button == "LeftButton" and EditModeManagerFrame and EditModeManagerFrame:IsShown() then
+            OpenSettings()
+        end
+    end)
 
     f:Hide()
     return f
@@ -89,8 +110,7 @@ end
 
 -------------------------------------------------------------------------------
 -- Per-boss container
--- Anchored to the RIGHT edge of the boss portrait frame, vertically centred.
--- Icons flow left-to-right starting from offsetX past the boss frame edge.
+-- Anchored to the configured side of the boss frame; icons flow left-to-right.
 -------------------------------------------------------------------------------
 local function CreateBossTracker(bossIndex)
     local db = BossDebuffTrackerDB
@@ -101,10 +121,11 @@ local function CreateBossTracker(bossIndex)
     container:SetWidth((sz + ICON_SPACING) * MAX_DEBUFFS)
 
     local bossFrame = _G["Boss" .. bossIndex .. "TargetFrame"]
+    local anchorInfo = ANCHOR_MAP[db.anchor] or ANCHOR_MAP["RIGHT"]
     if bossFrame then
-        container:SetPoint("LEFT", bossFrame, "RIGHT", db.offsetX, db.offsetY)
+        container:SetPoint(anchorInfo.containerPoint, bossFrame, anchorInfo.bossPoint,
+            db.offsetX, db.offsetY)
     else
-        -- Fallback when boss frames aren't present (e.g. out of instance)
         container:SetPoint("CENTER", UIParent, "CENTER", 200, 150 - (bossIndex * 36))
     end
 
@@ -117,7 +138,41 @@ local function CreateBossTracker(bossIndex)
         icons[i] = icon
     end
 
-    return { frame = container, icons = icons, unit = "boss" .. bossIndex, index = bossIndex }
+    -- ── Edit Mode handle ──────────────────────────────────────────────────────
+    -- Visible only in Edit Mode; click opens the settings panel.
+    local handle = CreateFrame("Button", nil, container, "BackdropTemplate")
+    handle:SetSize(180, 28)
+    handle:SetPoint("LEFT", container, "LEFT", 0, 0)
+    handle:SetBackdrop({
+        bgFile   = "Interface/Tooltips/UI-Tooltip-Background",
+        edgeFile = "Interface/Tooltips/UI-Tooltip-Border",
+        tile = true, tileSize = 8, edgeSize = 8,
+        insets = { left = 2, right = 2, top = 2, bottom = 2 },
+    })
+    handle:SetBackdropColor(0.05, 0.05, 0.20, 0.92)
+    handle:SetBackdropBorderColor(0.30, 0.55, 1.00, 1.00)
+
+    local handleLabel = handle:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    handleLabel:SetAllPoints()
+    handleLabel:SetText("Boss Debuff Tracker")
+    handleLabel:SetJustifyH("CENTER")
+
+    handle:SetScript("OnClick", OpenSettings)
+    handle:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Click to open Boss Debuff Tracker settings", 1, 1, 1)
+        GameTooltip:Show()
+    end)
+    handle:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    handle:Hide()
+
+    return {
+        frame  = container,
+        icons  = icons,
+        unit   = "boss" .. bossIndex,
+        index  = bossIndex,
+        handle = handle,
+    }
 end
 
 -------------------------------------------------------------------------------
@@ -156,7 +211,7 @@ local function UpdateBossDebuffs(tracker)
     end
 
     -- ── TEST MODE ────────────────────────────────────────────────────────────
-    if db.testMode then
+    if db.testMode and not playerInCombat then
         for i, spell in ipairs(TEST_SPELLS) do
             if shown >= limit then break end
             if not db.onlyMine or spell.mine then
@@ -189,41 +244,38 @@ local function UpdateBossDebuffs(tracker)
         return
     end
 
-    local playerName = UnitName("player")
     local i = 1
     while shown < limit do
-        local name, _, icon, count, debuffType,
-              duration, expirationTime, caster, _, _, spellId =
-            UnitAura(unit, i, "HARMFUL")
-        if not name then break end
+        local aura = C_UnitAuras.GetAuraDataByIndex(unit, i, "HARMFUL")
+        if not aura then break end
 
         -- onlyMine filter: caster must be the player
-        local passOwner = not db.onlyMine or (caster == "player")
+        local passOwner = not db.onlyMine or (aura.sourceUnit == "player")
         -- optional spell whitelist
-        local passFilter = not hasFilter or filter[spellId]
+        local passFilter = not hasFilter or filter[aura.spellId]
 
         if passOwner and passFilter then
             shown = shown + 1
             local slot = icons[shown]
-            slot.icon:SetTexture(icon)
+            slot.icon:SetTexture(aura.icon)
             slot.unit  = unit
             slot.index = i
 
-            if duration and duration > 0 then
-                slot.cooldown:SetCooldown(expirationTime - duration, duration)
+            if aura.duration and aura.duration > 0 then
+                slot.cooldown:SetCooldown(aura.expirationTime - aura.duration, aura.duration)
                 if db.showTimer then slot.cooldown:Show() else slot.cooldown:Hide() end
             else
                 slot.cooldown:Hide()
             end
 
-            if count and count > 1 and db.showStacks then
-                slot.stacks:SetText(count)
+            if aura.applications and aura.applications > 1 and db.showStacks then
+                slot.stacks:SetText(aura.applications)
                 slot.stacks:Show()
             else
                 slot.stacks:Hide()
             end
 
-            local c = debuffTypeColors[debuffType]
+            local c = debuffTypeColors[aura.dispelName]
             if c then slot.border:SetVertexColor(c.r, c.g, c.b); slot.border:Show()
             else slot.border:Hide() end
 
@@ -267,16 +319,18 @@ ApplyTimers = function()
     end
 end
 
--- Re-anchor ALL boss containers using the single shared offset
+-- Re-anchor ALL boss containers using the current anchor side + offsets
 ApplyAllOffsets = function()
     local db = BossDebuffTrackerDB
+    local anchorInfo = ANCHOR_MAP[db.anchor] or ANCHOR_MAP["RIGHT"]
     for bi = 1, MAX_BOSSES do
         local t = BossFrames[bi]
         if t then
             local bossFrame = _G["Boss" .. bi .. "TargetFrame"]
             t.frame:ClearAllPoints()
             if bossFrame then
-                t.frame:SetPoint("LEFT", bossFrame, "RIGHT", db.offsetX, db.offsetY)
+                t.frame:SetPoint(anchorInfo.containerPoint, bossFrame,
+                    anchorInfo.bossPoint, db.offsetX, db.offsetY)
             else
                 t.frame:SetPoint("CENTER", UIParent, "CENTER", 200, 150 - (bi * 36))
             end
@@ -302,10 +356,34 @@ UpdateAll = function()
     end
 end
 
+-- Shows or hides the Edit Mode click handles on every tracker
+local function SetEditModeHandles(show)
+    for i = 1, MAX_BOSSES do
+        if BossFrames[i] and BossFrames[i].handle then
+            if show then BossFrames[i].handle:Show()
+            else          BossFrames[i].handle:Hide() end
+        end
+    end
+end
+
+local function DisableTestMode()
+    local db = BossDebuffTrackerDB
+    if not db.testMode then return end
+    db.testMode = false
+    for i = 1, MAX_BOSSES do
+        if BossFrames[i] then
+            for j = 1, MAX_DEBUFFS do BossFrames[i].icons[j]:Hide() end
+        end
+    end
+    if testModeBtn then testModeBtn.Refresh() end
+    UpdateAll()
+end
+
 -------------------------------------------------------------------------------
 -- Throttled ticker
 -------------------------------------------------------------------------------
-local ticker     = 0
+local ticker        = 0
+local playerInCombat = false   -- set by PLAYER_REGEN_DISABLED/ENABLED events
 local eventFrame = CreateFrame("Frame", ADDON_NAME .. "EventFrame", UIParent)
 eventFrame:SetScript("OnUpdate", function(self, elapsed)
     ticker = ticker + elapsed
@@ -407,8 +485,49 @@ local function MakeSlider(parent, label, minVal, maxVal, step, x, y, width, gett
     return group
 end
 
--- Forward declaration so RegisterInterfaceOptions can reference it
-local OpenSettings
+local dropdownSeq = 0  -- unique name counter for UIDropDownMenu frames
+local function MakeDropdown(parent, label, x, y, width, options, getter, setter)
+    local title = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    title:SetPoint("TOPLEFT", parent, "TOPLEFT", x, -y)
+    title:SetText(label)
+
+    dropdownSeq = dropdownSeq + 1
+    local dd = CreateFrame("Frame", ADDON_NAME .. "DD" .. dropdownSeq, parent,
+        "UIDropDownMenuTemplate")
+    dd:SetPoint("TOPLEFT", title, "BOTTOMLEFT", -15, -2)
+    UIDropDownMenu_SetWidth(dd, width)
+
+    local function RefreshText()
+        local cur = getter()
+        for _, opt in ipairs(options) do
+            if opt.value == cur then
+                UIDropDownMenu_SetText(dd, opt.label)
+                break
+            end
+        end
+    end
+
+    UIDropDownMenu_Initialize(dd, function(self, level)
+        for _, opt in ipairs(options) do
+            local info = UIDropDownMenu_CreateInfo()
+            info.text    = opt.label
+            info.value   = opt.value
+            info.checked = (getter() == opt.value)
+            info.func    = function(btn)
+                UIDropDownMenu_SetSelectedValue(dd, btn.value)
+                setter(btn.value)
+                RefreshText()
+            end
+            UIDropDownMenu_AddButton(info)
+        end
+    end)
+    RefreshText()
+
+    local group = {}
+    function group:Enable()  UIDropDownMenu_EnableDropDown(dd);  title:SetAlpha(1)   end
+    function group:Disable() UIDropDownMenu_DisableDropDown(dd); title:SetAlpha(0.4) end
+    return group
+end
 
 local function BuildSettingsPanel()
     local db = BossDebuffTrackerDB
@@ -523,18 +642,30 @@ local function BuildSettingsPanel()
     -- POSITION  (single shared offset for all boss frames)
     -- ════════════════════════════════════════════════════════════════
     MakeSeparator(panel, cx, cy, PANEL_W - 32); cy = cy + 10
-    MakeSectionLabel(panel, "Position  (all boss frames)", cx, cy); cy = cy + 20
-    MakeLabel(panel, "Debuffs appear to the right of each boss frame.", cx, cy); cy = cy + 24
+    MakeSectionLabel(panel, "Position  (all boss frames)", cx, cy); cy = cy + 24
 
-    -- Horizontal gap: negative values move icons left/closer to the boss frame
+    -- Anchor side dropdown
     table.insert(dependentControls,
-        MakeSlider(panel, "Horizontal gap from boss frame  (X)", -80, 80, 1,
+        MakeDropdown(panel, "Debuff anchor side", cx, cy, 160,
+            {
+                { label = "Right of boss frame",  value = "RIGHT"  },
+                { label = "Left of boss frame",   value = "LEFT"   },
+                { label = "Above boss frame",     value = "TOP"    },
+                { label = "Below boss frame",     value = "BOTTOM" },
+            },
+            function() return db.anchor end,
+            function(v) db.anchor = v; ApplyAllOffsets() end
+        )); cy = cy + 56
+
+    -- Horizontal fine-tune
+    table.insert(dependentControls,
+        MakeSlider(panel, "Horizontal offset  (X)", -80, 80, 1,
             cx, cy, SLIDER_W,
             function() return db.offsetX end,
             function(v) db.offsetX = v; ApplyAllOffsets() end,
             "%d px")); cy = cy + 62
 
-    -- Vertical nudge slider  (-60 to +60 px)
+    -- Vertical fine-tune
     table.insert(dependentControls,
         MakeSlider(panel, "Vertical offset  (Y)  — positive = up", -60, 60, 1,
             cx, cy, SLIDER_W,
@@ -551,6 +682,8 @@ local function BuildSettingsPanel()
 
     -- Sync control states whenever the panel is opened
     panel:SetScript("OnShow", RefreshControlStates)
+    -- Auto-disable test mode when the settings panel is closed
+    panel:SetScript("OnHide", DisableTestMode)
 
     panel:SetHeight(cy + 40)
     return panel
@@ -592,6 +725,8 @@ end
 -------------------------------------------------------------------------------
 eventFrame:RegisterEvent("ADDON_LOADED")
 eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+eventFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
+eventFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
 eventFrame:RegisterEvent("UNIT_AURA")
 eventFrame:RegisterEvent("INSTANCE_ENCOUNTER_ENGAGE_UNIT")
 
@@ -601,12 +736,36 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
         if name == ADDON_NAME then
             ApplyDefaults(BossDebuffTrackerDB, DEFAULTS)
             RegisterInterfaceOptions()
+            -- Show handles when Edit Mode opens; hide + disable test mode when it closes
+            if EditModeManagerFrame then
+                EditModeManagerFrame:HookScript("OnShow", function()
+                    SetEditModeHandles(true)
+                end)
+                EditModeManagerFrame:HookScript("OnHide", function()
+                    SetEditModeHandles(false)
+                    DisableTestMode()
+                end)
+            end
             print("|cff00ccff[BossDebuffTracker]|r loaded. " ..
                   "Type |cffffd700/bdt|r to open addon settings.")
         end
 
     elseif event == "PLAYER_ENTERING_WORLD" then
         InitTrackers()
+        UpdateAll()
+
+    elseif event == "PLAYER_REGEN_DISABLED" then
+        playerInCombat = true
+        -- Immediately clear any visible test icons before live debuffs take over
+        for i = 1, MAX_BOSSES do
+            if BossFrames[i] then
+                for j = 1, MAX_DEBUFFS do BossFrames[i].icons[j]:Hide() end
+            end
+        end
+        UpdateAll()
+
+    elseif event == "PLAYER_REGEN_ENABLED" then
+        playerInCombat = false
         UpdateAll()
 
     elseif event == "UNIT_AURA" then
