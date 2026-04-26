@@ -117,7 +117,7 @@ local function CreateBossTracker(bossIndex)
         icons[i] = icon
     end
 
-    return { frame = container, icons = icons, unit = "boss" .. bossIndex }
+    return { frame = container, icons = icons, unit = "boss" .. bossIndex, index = bossIndex }
 end
 
 -------------------------------------------------------------------------------
@@ -146,6 +146,14 @@ local function UpdateBossDebuffs(tracker)
     local hasFilter = next(filter) ~= nil
     local limit     = math.min(db.maxDebuffs, MAX_DEBUFFS)
     local shown     = 0
+
+    -- Hide everything if the boss frame itself isn't visible (e.g. outside an
+    -- encounter and not in Edit Mode). Prevents test icons floating on screen.
+    local bossFrame = _G["Boss" .. tracker.index .. "TargetFrame"]
+    if bossFrame and not bossFrame:IsShown() then
+        for i = 1, MAX_DEBUFFS do icons[i]:Hide() end
+        return
+    end
 
     -- ── TEST MODE ────────────────────────────────────────────────────────────
     if db.testMode then
