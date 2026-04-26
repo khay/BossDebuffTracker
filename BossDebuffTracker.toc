@@ -1,0 +1,8 @@
+## Interface: 120005
+## Title: Boss Debuff Tracker
+## Notes: Tracks debuffs on boss unit frames
+## Author: K
+## Version: 1.0
+## SavedVariables: BossDebuffTrackerDB
+
+BossDebuffTracker.lua
