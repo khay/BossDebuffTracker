@@ -375,8 +375,17 @@ local function DisableTestMode()
             for j = 1, MAX_DEBUFFS do BossFrames[i].icons[j]:Hide() end
         end
     end
-    if testModeBtn then testModeBtn.Refresh() end
     UpdateAll()
+end
+
+-- Only disables test mode when BOTH the Edit Mode window and the Settings
+-- panel are closed, so test debuffs persist while either window is open.
+local function MaybeDisableTestMode()
+    local editModeOpen = EditModeManagerFrame and EditModeManagerFrame:IsShown()
+    local settingsOpen = SettingsPanel and SettingsPanel:IsShown()
+    if not editModeOpen and not settingsOpen then
+        DisableTestMode()
+    end
 end
 
 -------------------------------------------------------------------------------
@@ -580,21 +589,15 @@ local function BuildSettingsPanel()
             RefreshControlStates()
         end); cy = cy + 30
 
-    testModeBtn = MakeToggleButton(panel,
-        "Disable Test Debuffs", "Enable Test Debuffs",
-        cx, cy, 180,
-        function() return db.testMode end,
-        function(v)
-            db.testMode = v
-            if not v then
-                for i = 1, MAX_BOSSES do
-                    if BossFrames[i] then
-                        for j = 1, MAX_DEBUFFS do BossFrames[i].icons[j]:Hide() end
-                    end
-                end
-            end
-            UpdateAll()
-        end)
+    testModeBtn = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
+    testModeBtn:SetSize(180, 26)
+    testModeBtn:SetPoint("TOPLEFT", panel, "TOPLEFT", cx, -cy)
+    testModeBtn:SetText("Load test debuffs")
+    testModeBtn:SetScript("OnClick", function()
+        db.testMode = true
+        UpdateAll()
+    end)
+    testModeBtn.Refresh = function() end  -- no-op; button label is always the same
     table.insert(dependentControls, testModeBtn); cy = cy + 36
 
     -- ════════════════════════════════════════════════════════════════
@@ -682,8 +685,9 @@ local function BuildSettingsPanel()
 
     -- Sync control states whenever the panel is opened
     panel:SetScript("OnShow", RefreshControlStates)
-    -- Auto-disable test mode when the settings panel is closed
-    panel:SetScript("OnHide", DisableTestMode)
+    -- Disable test mode when the settings panel closes, but only if Edit Mode
+    -- is also closed (so test debuffs persist while either window is open).
+    panel:SetScript("OnHide", MaybeDisableTestMode)
 
     panel:SetHeight(cy + 40)
     return panel
@@ -743,7 +747,7 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
                 end)
                 EditModeManagerFrame:HookScript("OnHide", function()
                     SetEditModeHandles(false)
-                    DisableTestMode()
+                    MaybeDisableTestMode()
                 end)
             end
             print("|cff00ccff[BossDebuffTracker]|r loaded. " ..
