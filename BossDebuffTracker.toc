@@ -3,6 +3,7 @@
 ## Notes: Tracks debuffs on boss unit frames
 ## Author: K
 ## Version: 1.0
+## IconTexture: Interface\AddOns\BossDebuffTracker\BossDebuffTracker
 ## SavedVariables: BossDebuffTrackerDB
 
 BossDebuffTracker.lua
